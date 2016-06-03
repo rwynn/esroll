@@ -13,7 +13,7 @@ esroll is a go daemon to ensure some elasticsearch scaling best practices such a
 [Index per Time Frame](https://www.elastic.co/guide/en/elasticsearch/guide/current/time-based.html) and
 [Retiring Data](https://www.elastic.co/guide/en/elasticsearch/guide/current/retiring-data.html).
 
-esroll helps you manage time based indices by keeping a pair of aliases (one for indexing and one for search)
+esroll helps you manage time and size based indices by keeping a pair of aliases (one for indexing and one for search)
 pointing to a set of indices it creates periodically. At a minimum you need to configure esroll to have an `indexTarget`
 and a `rollUnit`.  
 
@@ -66,7 +66,7 @@ esroll to delete them, close them, or just keep them open.
 
 In this example a `rollUnit` of years was used to keep things simple.  But rolling over once a year is probably not
 optimal if you have alot of data coming into elasticsearch.  esroll provides the following values for `rollUnit` - minutes,
-hours, days, months, and years.  esroll provides another option `rollIncrement` which is an integer. Together `rollUnit`
+hours, days, months, years, and bytes.  esroll provides another option `rollIncrement` which is an integer. Together `rollUnit`
 and `rollIncrement` allow you to tell esroll to run its algorithm at intervals like 20 minutes, 3 hours, or 5 months.
 
 When something like 3 hours is used, its important to understand that esroll does not necessary roll 3 hours from the last
@@ -104,7 +104,7 @@ example of how to get a configuration into elasticsearch...
 		"settings": {
 			"index.routing.allocation.include.box_type" : "strong",
 			"index": {
-				"number_of_replicas": 5
+				"number_of_replicas": 1
 			}
 		},
 		"settingsOnRoll": {
@@ -167,4 +167,44 @@ this supply the `-url` argument and specify the URL to the elasticsearch REST AP
 
 If you need to install a self-signed certificate for connections to the elasticsearch REST API you can do so using 
 the `-pem` argument with the path to your PEM file.
+
+### Size Based Indexes ###
+
+A unique feature of esroll is that it supports size based indices.  That is you can configure esroll to run its roll
+algorithm when your primary index reaches a certain number of bytes on disk. esroll uses the cat indices API of elasticsearch
+to get the size on disk of the index periodically and rolls if it exceeds the configured threshold.
+
+To configure esroll for size based indices you would set the rollUnit to `bytes` and set the option `rollSize` to a human
+readable string representing the maximum size you would like the primary index to grow to. esroll uses the
+[go-humanize](https://github.com/dustin/go-humanize) library to parse the human readable size that you set on `rollSize`.
+
+For example, to test this feature you could set a low threshold of 20KB like so:
+
+	{
+		"targetIndex": "snowball",
+		"rollUnit": "bytes",
+		"rollSize": "20KB",
+		"searchAliases": 4,
+		"searchSuffix": "search",
+		"deleteOld": false,
+		"closeOld": true,
+		"optimizeOnRoll": true,
+		"settings": {
+			"index": {
+				"number_of_replicas": 1
+			}
+		}
+	}
+
+You can verify the size on disk of indices by using the cat index API.  For example:
+
+	$ curl localhost:9200/_cat/indices/_all
+	yellow open esroll                       5 1 1 0  6.2kb  6.2kb
+	yellow open snowball_2016-06-03-17-38-53 5 1 4 0 22.4kb 22.4kb
+	yellow open snowball_2016-06-03-17-36-53 5 1 4 0 22.4kb 22.4kb
+	yellow open snowball_2016-06-03-17-39-23 5 1 0 0   795b   795b
+	yellow open snowball_2016-06-03-17-35-03 5 1 4 0 22.4kb 22.4kb
+
+Since the size based roll is triggered by a short timeout it's possible that data is able to sneak in before the size check
+occurs.  You can under-size your `rollSize` value if this is the case to get closer to the desired index size.
 

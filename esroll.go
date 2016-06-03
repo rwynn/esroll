@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/dustin/go-humanize"
 	elastigo "github.com/mattbaird/elastigo/lib"
 	"io/ioutil"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 )
 
 var rollUnits = map[string]bool{
+	"bytes":   true,
 	"minutes": true,
 	"hours":   true,
 	"days":    true,
@@ -58,8 +60,9 @@ type EsRollConfig struct {
 }
 
 type Index struct {
-	Name   string
-	Status string
+	Name    string
+	Status  string
+	PriSize int64
 }
 
 type IndexConfig struct {
@@ -69,6 +72,7 @@ type IndexConfig struct {
 	TargetIndex             string                 `json:"targetIndex"`
 	RollIncrement           int                    `json:"rollIncrement"`
 	RollUnit                string                 `json:"rollUnit"`
+	RollSize                string                 `json:"rollSize",omitempty`
 	IndexesToAliasForSearch int                    `json:"searchAliases",omitempty`
 	SearchSuffix            string                 `json:"searchSuffix",omitempty`
 	DeleteOldIndexes        bool                   `json:"deleteOld",omitempty`
@@ -147,6 +151,18 @@ func (config *IndexConfig) Validate() error {
 	if config.OptimizeMaxSegments < 0 {
 		return errors.New("optimizeMaxSegments must be greater than or equal to 0")
 	}
+	if config.RollUnit == "bytes" {
+		if config.RollSize == "" {
+			return errors.New("rollSize is required if the rollUnit is bytes")
+		} else {
+			maxBytes, err := humanize.ParseBytes(config.RollSize)
+			if err != nil {
+				return err
+			} else if maxBytes == 0 {
+				return errors.New("rollSize must be greater than 0 bytes")
+			}
+		}
+	}
 	return nil
 }
 
@@ -163,7 +179,9 @@ func (config *IndexConfig) SetDefaults() {
 }
 
 func (config *IndexConfig) IndexSuffixFormat() string {
-	if config.RollUnit == "minutes" {
+	if config.RollUnit == "bytes" {
+		return "2006-01-02-15-04-05"
+	} else if config.RollUnit == "minutes" {
 		return "2006-01-02-15-04"
 	} else if config.RollUnit == "hours" {
 		return "2006-01-02-15"
@@ -181,9 +199,47 @@ func (config *IndexConfig) NextIndex(t time.Time) string {
 	return config.TargetIndex + "_" + suffix
 }
 
+func (config *IndexConfig) IndexSize(conn *elastigo.Conn) (int64, error) {
+	catIndexInfo := conn.GetCatIndexInfo(config.TargetIndex)
+	infoSize := len(catIndexInfo)
+	if infoSize == 0 {
+		return 0, errors.New("Unable to find index in size calculation")
+	} else if infoSize > 1 {
+		return 0, errors.New("Too many indices returned in size calculation")
+	} else {
+		index := catIndexInfo[0]
+		return index.Store.PriSize, nil
+	}
+}
+
+func (config *IndexConfig) HasRoom(conn *elastigo.Conn) (bool, error) {
+	if exists, _ := conn.ExistsIndex(config.TargetIndex, "", nil); !exists {
+		return false, nil
+	} else {
+		priSize, err := config.IndexSize(conn)
+		if err != nil {
+			return true, err
+		} else {
+			maxBytes, err := humanize.ParseBytes(config.RollSize)
+			if err != nil {
+				return true, err
+			} else {
+				return priSize < int64(maxBytes), nil
+			}
+		}
+	}
+}
+
 func (config *IndexConfig) Roll(conn *elastigo.Conn, t time.Time) error {
 	nextIndex := config.NextIndex(t)
-	if exists, _ := conn.ExistsIndex(nextIndex, "", nil); exists {
+	if config.RollsOnSize() {
+		room, err := config.HasRoom(conn)
+		if err != nil {
+			return err
+		} else if room {
+			return nil
+		}
+	} else if exists, _ := conn.ExistsIndex(nextIndex, "", nil); exists {
 		return nil
 	}
 	settings := make(map[string]interface{})
@@ -255,27 +311,33 @@ func (config *IndexConfig) Roll(conn *elastigo.Conn, t time.Time) error {
 	return nil
 }
 
+func (config *IndexConfig) RollsOnSize() bool {
+	return config.RollUnit == "bytes"
+}
+
 func (config *IndexConfig) ShouldRoll(t time.Time) bool {
 	var roll bool = false
-	if config.RollUnit == "minutes" {
-		roll = t.Second() == 0
-		if config.RollIncrement != 0 {
-			roll = roll && t.Minute()%config.RollIncrement == 0
-		}
-	} else if config.RollUnit == "hours" {
-		roll = t.Second() == 0 && t.Minute() == 0
-		if config.RollIncrement != 0 {
-			roll = roll && t.Hour()%config.RollIncrement == 0
-		}
-	} else {
-		roll = t.Second() == 0 && t.Minute() == 0 && t.Hour() == 0
-		if config.RollIncrement != 0 {
-			if config.RollUnit == "days" {
-				roll = roll && t.YearDay()%config.RollIncrement == 0
-			} else if config.RollUnit == "months" {
-				roll = roll && int(t.Month())%config.RollIncrement == 0
-			} else if config.RollUnit == "years" {
-				roll = roll && t.Year()%config.RollIncrement == 0
+	if !config.RollsOnSize() {
+		if config.RollUnit == "minutes" {
+			roll = t.Second() == 0
+			if config.RollIncrement != 0 {
+				roll = roll && t.Minute()%config.RollIncrement == 0
+			}
+		} else if config.RollUnit == "hours" {
+			roll = t.Second() == 0 && t.Minute() == 0
+			if config.RollIncrement != 0 {
+				roll = roll && t.Hour()%config.RollIncrement == 0
+			}
+		} else {
+			roll = t.Second() == 0 && t.Minute() == 0 && t.Hour() == 0
+			if config.RollIncrement != 0 {
+				if config.RollUnit == "days" {
+					roll = roll && t.YearDay()%config.RollIncrement == 0
+				} else if config.RollUnit == "months" {
+					roll = roll && int(t.Month())%config.RollIncrement == 0
+				} else if config.RollUnit == "years" {
+					roll = roll && t.Year()%config.RollIncrement == 0
+				}
 			}
 		}
 	}
@@ -339,6 +401,7 @@ func main() {
 	}
 	if mainConfig.Daemon {
 		var configTicker = time.NewTicker(10 * time.Second)
+		var sizeTicker = time.NewTicker(10 * time.Second)
 		var workQ = make(chan (time.Time))
 		var initQ = make(chan (IndexConfig))
 		go func(conn *elastigo.Conn) {
@@ -346,6 +409,7 @@ func main() {
 			signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL)
 			<-sigs
 			configTicker.Stop()
+			sizeTicker.Stop()
 			conn.Close()
 			os.Exit(0)
 		}(conn)
@@ -353,22 +417,34 @@ func main() {
 			var clock = time.NewTicker(1 * time.Second)
 			for {
 				t := <-clock.C
+				t = t.UTC()
 				if AddWork(t) {
 					workQ <- t
 				}
 			}
-
 		}()
 		for {
 			select {
 			case t := <-workQ:
 				for _, conf := range configs {
 					if conf.ShouldRoll(t) {
-						conf.Roll(conn, t)
+						if err := conf.Roll(conn, t); err != nil {
+							fmt.Println(err)
+						}
+					}
+				}
+			case <-sizeTicker.C:
+				for _, conf := range configs {
+					if conf.RollsOnSize() {
+						if err := conf.Roll(conn, time.Now().UTC()); err != nil {
+							fmt.Println(err)
+						}
 					}
 				}
 			case conf := <-initQ:
-				conf.Roll(conn, time.Now().UTC())
+				if err := conf.Roll(conn, time.Now().UTC()); err != nil {
+					fmt.Println(err)
+				}
 			case <-configTicker.C:
 				configs, err = GetConfigs(conn)
 				if err == nil {
@@ -380,12 +456,16 @@ func main() {
 							}()
 						}
 					}
+				} else {
+					fmt.Println(err)
 				}
 			}
 		}
 	} else {
 		for _, conf := range configs {
-			conf.Roll(conn, time.Now().UTC())
+			if err := conf.Roll(conn, time.Now().UTC()); err != nil {
+				fmt.Println(err)
+			}
 		}
 	}
 }
