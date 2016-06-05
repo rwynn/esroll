@@ -1,11 +1,20 @@
 # esroll
-a go daemon to ensure some elasticsearch best practices
+a go daemon to manage your elasticsearch indices
 
 <img width="480" height="339" src="https://raw.github.com/rwynn/esroll/master/images/esroll.jpg"/>
 
 ### Install ###
 
 	go get github.com/rwynn/esroll
+	
+### How is this different from elastic curator? ###
+
+[Curator](https://github.com/elastic/curator) is a tool from elastic for running commands on your indices.  The commands take parameters which let you 
+
+  * filter and select the set on indices to operate on
+  * customize the action performed on the selected indices.
+
+Of course curator commands can be arranged together in a script to create a higher level operation.  Well, of all the possible combinations of things you could do with curator, esroll picks a series of targeted operations and calls that a “roll”.  The job of a roll is to create a new index, adjust the set of indices which a pair of aliases point to, and finally perform the following operations on old indices: update settings, optimize (force merge), close, or delete.  So, in contrast to curator, esroll is not command based.  You don’t script commands to give to esroll, rather you tell it what you want done during a “roll”.  Esroll is also a daemon, so it can run in the background and it will run a “roll” when an event is triggered.  Events can be temporal, like run a roll every 2 hours, or events can be based on changes in attributes of the index (i.e. physical size), like run a roll when this index exceeds 2GB.
 
 ### Design ###
 
@@ -13,7 +22,7 @@ esroll is a go daemon to ensure some elasticsearch scaling best practices such a
 [Index per Time Frame](https://www.elastic.co/guide/en/elasticsearch/guide/current/time-based.html) and
 [Retiring Data](https://www.elastic.co/guide/en/elasticsearch/guide/current/retiring-data.html).
 
-esroll helps you manage time and size based indices by keeping a pair of aliases (one for indexing and one for search)
+esroll helps you manage indices by keeping a pair of aliases (one for indexing and one for search)
 pointing to a set of indices it creates periodically. At a minimum you need to configure esroll to have an `indexTarget`
 and a `rollUnit`.  
 
@@ -148,7 +157,7 @@ and start using them.
 	closeOld             : false
 	optimizeOnRoll       : false
 	optimizeMaxSegments  : do not specify max segments when optimizing
-	settings	     : do not specify settings when creating indexes
+	settings             : do not specify settings when creating indexes
 	settingsOnRoll       : do not update settings on roll
 
 You start esroll as follows:
