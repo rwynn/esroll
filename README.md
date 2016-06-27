@@ -9,12 +9,14 @@ a go daemon to manage your elasticsearch indices
 	
 ### How is this different from elastic curator? ###
 
-[Curator](https://github.com/elastic/curator) is a tool from elastic for running commands on your indices.  The commands take parameters which let you 
+[Curator](https://github.com/elastic/curator) is a tool from elastic for running [Actions](https://www.elastic.co/guide/en/elasticsearch/client/curator/current/actions.html) on your indices.  Actions take arguments which let you 
 
   * filter and select the set on indices to operate on
-  * customize the action performed on the selected indices.
+  * customize the options for the action performed on the selected indices.
 
-Of course curator commands can be arranged together in a script to create a higher level operation.  Well, of all the possible combinations of things you could do with curator, esroll picks a series of targeted operations and calls that a “roll”.  The job of a roll is to create a new index, adjust the set of indices which a pair of aliases point to, and finally perform the following operations on old indices: update settings, optimize (force merge), close, or delete.  So, in contrast to curator, esroll is not command based.  You don’t script commands to give to esroll, rather you tell it what you want done during a “roll”.  Esroll is also a daemon, so it can run in the background and it will run a “roll” when an event is triggered.  Events can be temporal, like run a roll every 2 hours, or events can be based on changes in attributes of the index (i.e. physical size), like run a roll when this index exceeds 2GB.
+Curator Actions can be aggregated in [Action Files](https://www.elastic.co/guide/en/elasticsearch/client/curator/current/actionfile.html) to perform higher level operations.  Well, of all the possible combinations of Actions you could do with curator in a Action File, esroll wires a series of targeted Actions which it calls a `roll`.  
+
+The job of a roll is to create a new index, adjust the set of indices which a pair of aliases point to, and finally perform the following operations on old indices: update settings, optimize (force merge), close, or delete.  So, in contrast to curator, esroll is not Action based.  You don’t aggregate Actions in an Action File to give to esroll, rather you tell esroll what events trigger a `roll` and declare how the roll is performed.  Events can be temporal, like run a roll every 2 hours, or events can be based on changes in attributes of the index (i.e. physical size), like run a roll when an index exceeds 2GB.
 
 ### Design ###
 
