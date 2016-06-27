@@ -14,9 +14,11 @@ a go daemon to manage your elasticsearch indices
   * filter and select the set on indices to operate on
   * customize the options for the action performed on the selected indices.
 
-Curator Actions can be aggregated in [Action Files](https://www.elastic.co/guide/en/elasticsearch/client/curator/current/actionfile.html) to perform higher level operations.  Well, of all the possible combinations of Actions you could do with curator in a Action File, esroll wires a series of targeted Actions which it calls a `roll`.  
+Curator Actions can be aggregated in [Action Files](https://www.elastic.co/guide/en/elasticsearch/client/curator/current/actionfile.html) to perform higher level operations.  Well, of all the possible combinations of Actions you could do with curator in a Action File, esroll wires a series of targeted Actions which it calls a `roll`.  You can think of a roll as an Action File you don't need to write yourself. 
 
-The job of a roll is to create a new index, adjust the set of indices which a pair of aliases point to, and finally perform the following operations on old indices: update settings, optimize (force merge), close, or delete.  So, in contrast to curator, esroll is not Action based.  You don’t aggregate Actions in an Action File to give to esroll, rather you tell esroll what events trigger a `roll` and declare how the roll is performed.  Events can be temporal, like run a roll every 2 hours, or events can be based on changes in attributes of the index (i.e. physical size), like run a roll when an index exceeds 2GB.
+The job of a roll is to create a new index, adjust the set of indices which a pair of aliases point to, and finally perform the following operations on old indices: update settings, optimize (force merge), close, or delete.  
+
+So, in contrast to curator, you don’t aggregate Actions in an Action File to give to esroll. Rather you tell esroll what events trigger a `roll` and customize how the roll is performed.  Events can be temporal, like run a roll every 2 hours, or events can be based on changes in attributes of the index (i.e. physical size), like run a roll when an index exceeds 2GB.
 
 ### Design ###
 
