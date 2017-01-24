@@ -11,6 +11,7 @@ import (
 	"github.com/dustin/go-humanize"
 	elastigo "github.com/mattbaird/elastigo/lib"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,6 +29,8 @@ var rollUnits = map[string]bool{
 	"months":  true,
 	"years":   true,
 }
+
+const Version string = "1.2"
 
 const ExampleConfig string = `curl -XPUT localhost:9200/esroll/config/snowball -d '{
 	"targetIndex": "snowball",
@@ -98,7 +101,7 @@ func GetConfigs(conn *elastigo.Conn) (Configs, error) {
 		configData.Id = hit.Id
 		configData.SetDefaults()
 		if err := configData.Validate(); err != nil {
-			fmt.Println(err)
+			log.Println(err)
 		} else {
 			configs = append(configs, configData)
 		}
@@ -374,13 +377,20 @@ func (config *EsRollConfig) ConfigTransport() error {
 }
 
 func main() {
+	log.SetPrefix("ERROR ")
 	var mainConfig EsRollConfig
+	var showVersion bool
+	flag.BoolVar(&showVersion, "v", false, "True to print the version number")
 	flag.StringVar(&mainConfig.ElasticUrl, "url", "", "ElasticSearch connection URL")
 	flag.StringVar(&mainConfig.ElasticPemFile, "pem", "", "Path to a PEM file for secure connections to ElasticSearch")
 	flag.BoolVar(&mainConfig.Daemon, "daemon", false, "Run as a daemon")
 	flag.Parse()
+	if showVersion {
+		fmt.Println(Version)
+		os.Exit(0)
+	}
 	if err := mainConfig.ConfigTransport(); err != nil {
-		panic(err)
+		log.Panic(err)
 	}
 	conn := elastigo.NewConn()
 	if mainConfig.ElasticUrl != "" {
@@ -389,9 +399,9 @@ func main() {
 	configs, err := GetConfigs(conn)
 	if err != nil {
 		if mainConfig.Daemon {
-			fmt.Println("Configuration for esroll invalid or not found, waiting till one exists")
+			log.Println("Configuration for esroll invalid or not found, waiting till one exists")
 		} else {
-			fmt.Println("Configuration for esroll invalid or not found")
+			log.Println("Configuration for esroll invalid or not found")
 		}
 		fmt.Println("You can create one with ...")
 		fmt.Println(ExampleConfig)
@@ -429,7 +439,7 @@ func main() {
 				for _, conf := range configs {
 					if conf.ShouldRoll(t) {
 						if err := conf.Roll(conn, t); err != nil {
-							fmt.Println(err)
+							log.Println(err)
 						}
 					}
 				}
@@ -437,13 +447,13 @@ func main() {
 				for _, conf := range configs {
 					if conf.RollsOnSize() {
 						if err := conf.Roll(conn, time.Now().UTC()); err != nil {
-							fmt.Println(err)
+							log.Println(err)
 						}
 					}
 				}
 			case conf := <-initQ:
 				if err := conf.Roll(conn, time.Now().UTC()); err != nil {
-					fmt.Println(err)
+					log.Println(err)
 				}
 			case <-configTicker.C:
 				configs, err = GetConfigs(conn)
@@ -457,14 +467,14 @@ func main() {
 						}
 					}
 				} else {
-					fmt.Println(err)
+					log.Println(err)
 				}
 			}
 		}
 	} else {
 		for _, conf := range configs {
 			if err := conf.Roll(conn, time.Now().UTC()); err != nil {
-				fmt.Println(err)
+				log.Println(err)
 			}
 		}
 	}

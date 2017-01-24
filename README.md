@@ -181,6 +181,11 @@ this supply the `-url` argument and specify the URL to the elasticsearch REST AP
 If you need to install a self-signed certificate for connections to the elasticsearch REST API you can do so using 
 the `-pem` argument with the path to your PEM file.
 
+### Index Templates ###
+
+Since esroll creates indexes on your behalf you will want to setup `Index Templates` specifically if you would like to control property
+mappings for your types.  For more information see [Index Templates](https://www.elastic.co/guide/en/elasticsearch/reference/current/indices-templates.html).
+
 ### Size Based Indexes ###
 
 A unique feature of esroll is that it supports size based indices.  That is you can configure esroll to run its roll
