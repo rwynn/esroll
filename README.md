@@ -1,9 +1,15 @@
 # esroll
-a go daemon to manage your elasticsearch indices
+a go daemon to manage your Elasticsearch version 6+ indices
 
 <img width="480" height="339" src="https://raw.github.com/rwynn/esroll/master/images/esroll.jpg"/>
 
+### Versions ###
+
+The 1.3 version of esroll is designed to work with Elasticsearch 6+
+
 ### Install ###
+
+Download a binary from the releases page or use `go get`.
 
 	go get github.com/rwynn/esroll
 	
@@ -22,7 +28,7 @@ So, in contrast to curator, you don’t aggregate Actions in an Action File to g
 
 ### Design ###
 
-esroll is a go daemon to ensure some elasticsearch scaling best practices such as
+esroll is a go daemon to ensure some Elasticsearch scaling best practices such as
 [Index per Time Frame](https://www.elastic.co/guide/en/elasticsearch/guide/current/time-based.html) and
 [Retiring Data](https://www.elastic.co/guide/en/elasticsearch/guide/current/retiring-data.html).
 
@@ -78,7 +84,7 @@ Esroll lets you configure what you want to do with indices which no longer have 
 esroll to delete them, close them, or just keep them open. 
 
 In this example a `rollUnit` of years was used to keep things simple.  But rolling over once a year is probably not
-optimal if you have alot of data coming into elasticsearch.  esroll provides the following values for `rollUnit` - minutes,
+optimal if you have alot of data coming into Elasticsearch.  esroll provides the following values for `rollUnit` - minutes,
 hours, days, months, years, and bytes.  esroll provides another option `rollIncrement` which is an integer. Together `rollUnit`
 and `rollIncrement` allow you to tell esroll to run its algorithm at intervals like 20 minutes, 3 hours, or 5 months.
 
@@ -87,24 +93,24 @@ roll but rather when the hour of the day % 3 == 0.  It's possible that if you st
 at 1am, esroll would do an initial roll at 1am and then again at 3am, 6am, 9am, etc.  So even though you had set to roll
 every 3 hours, due to index initialization, there is only 2 hours between the 1st and 2nd roll.  
 
-From an elasticsearch client perspective you would usually deal only with the pair of indexes aliases created by
+From an Elasticsearch client perspective you would usually deal only with the pair of indexes aliases created by
 esroll and not the time based raw indexes.  This allows your client code concern itself with logical index names (indexing
 and searching) even though the indexes backing those aliases are changing over time.  
 
 Finally, the way the algorithm is explained above it may lead you to think that alias updates at the time of a roll are done
 serially, however, this is not the case.  All the alias updates are gathered together on the roll and made in one 
-request to elasticsearch.  
+request to Elasticsearch.  
 
 ### Usage ###
 
 Before running esroll you will probably want to configure it. It's not actually required that you config esroll before
-running it though.  That's because the esroll configuration is stored in elasticsearch and esroll will poll
+running it though.  That's because the esroll configuration is stored in Elasticsearch and esroll will poll
 periodically for changes in its configuration.
 
 Configuring esroll is done by indexing documents into the `esroll` index with the type `config`.  The following is an
-example of how to get a configuration into elasticsearch...
+example of how to get a configuration into Elasticsearch...
 
-	curl -XPUT localhost:9200/esroll/config/snowball -d '{
+	curl -XPUT -H'Content-type:application/json' localhost:9200/esroll/config/snowball -d '{
 		"targetIndex": "snowball",
 		"rollUnit": "minutes",
 		"rollIncrement": 3,
@@ -145,8 +151,8 @@ Let's look at some of the other settings we have configured...
 	closeOld = true -- flush and close indices when the alias count for the index drops to 0
 	optimizeOnRoll = true -- optimize the index when the alias count for the index drops to 1 (search)
 	optimizeMaxSegments = 2 -- pass max_num_segments=2 when optimizing
-	settings = elasticsearch settings -- use the specificed settings when creating each new time based index
-	settingsOnRoll = elasticseach settings -- update the index settings with this when the alias count for the index drops to 1 (search)
+	settings = Elasticsearch index settings -- use the specificed settings when creating each new time based index
+	settingsOnRoll = Elasticsearch index settings -- update the index settings with this when the alias count for the index drops to 1 (search)
 
 You may have as many of these configuration documents as you would like.  esroll will find them (even when running)
 and start using them.
@@ -175,10 +181,10 @@ on the command line.  In this mode esroll will manage scheduling internally.  It
 and periodically roll indexes according to the settings, updating its configuration dynamically along the way by pulling
 the most recent versions of the configuration documents.
 
-By default esroll will expect the elasticsearch REST API to be available at http://localhost:9200.  If you need to change
-this supply the `-url` argument and specify the URL to the elasticsearch REST API.
+By default esroll will expect the Elasticsearch REST API to be available at http://localhost:9200.  If you need to change
+this supply the `-url` argument and specify the URL to the Elasticsearch REST API.
 
-If you need to install a self-signed certificate for connections to the elasticsearch REST API you can do so using 
+If you need to install a self-signed certificate for connections to the Elasticsearch REST API you can do so using 
 the `-pem` argument with the path to your PEM file.
 
 ### Index Templates ###
@@ -189,7 +195,7 @@ mappings for your types.  For more information see [Index Templates](https://www
 ### Size Based Indexes ###
 
 A unique feature of esroll is that it supports size based indices.  That is you can configure esroll to run its roll
-algorithm when your primary index reaches a certain number of bytes on disk. esroll uses the cat indices API of elasticsearch
+algorithm when your primary index reaches a certain number of bytes on disk. esroll uses the cat indices API of Elasticsearch
 to get the size on disk of the index periodically and rolls if it exceeds the configured threshold.
 
 To configure esroll for size based indices you would set the rollUnit to `bytes` and set the option `rollSize` to a human

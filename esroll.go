@@ -1,15 +1,17 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/dustin/go-humanize"
-	elastigo "github.com/mattbaird/elastigo/lib"
+	"github.com/olivere/elastic"
+	aws "github.com/olivere/elastic/aws/v4"
 	"io/ioutil"
 	"log"
 	"net/http"
@@ -30,9 +32,9 @@ var rollUnits = map[string]bool{
 	"years":   true,
 }
 
-const Version string = "1.2"
+const Version string = "1.3.0"
 
-const ExampleConfig string = `curl -XPUT localhost:9200/esroll/config/snowball -d '{
+const ExampleConfig string = `curl -XPUT -H'Content-Type:application/json' localhost:9200/esroll/config/snowball -d '{
 	"targetIndex": "snowball",
 	"rollUnit": "minutes",
 	"rollIncrement": 3,
@@ -57,9 +59,15 @@ func (a ByIndexAge) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByIndexAge) Less(i, j int) bool { return a[i].Name < a[j].Name }
 
 type EsRollConfig struct {
-	ElasticUrl     string
-	ElasticPemFile string
-	Daemon         bool
+	ElasticUrl      string
+	ElasticUser     string
+	ElasticPassword string
+	ElasticPemFile  string
+	Insecure        bool
+	AWSAccessKey    string
+	AWSSecretKey    string
+	AWSRegion       string
+	Daemon          bool
 }
 
 type Index struct {
@@ -84,12 +92,13 @@ type IndexConfig struct {
 	OptimizeMaxSegments     int                    `json:"optimizeMaxSegments",omitempty`
 }
 
-func GetConfigs(conn *elastigo.Conn) (Configs, error) {
-	res, err := elastigo.Search("esroll").Type("config").Result(conn)
+func GetConfigs(client *elastic.Client) (Configs, error) {
+	search := client.Search("esroll")
+	res, err := search.Do(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	if res.Hits.Total == 0 {
+	if res.Hits.TotalHits == 0 {
 		return nil, errors.New("configuration documents not found")
 	}
 	var configs Configs
@@ -107,36 +116,6 @@ func GetConfigs(conn *elastigo.Conn) (Configs, error) {
 		}
 	}
 	return configs, nil
-}
-
-func PutSettings(conn *elastigo.Conn, index string, settings map[string]interface{}) error {
-	url := fmt.Sprintf("/%s/_settings", index)
-	body, err := json.Marshal(settings)
-	if err != nil {
-		return err
-	}
-	_, err = conn.DoCommand("PUT", url, nil, body)
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-func UpdateAliases(conn *elastigo.Conn, body string) error {
-	_, err := conn.DoCommand("POST", "/_aliases", nil, body)
-	return err
-}
-
-func UpdateAliasAction(action string, index string, alias string) string {
-	return fmt.Sprintf(`{ "%s" : { "index" : "%s", "alias" : "%s" } }`, action, index, alias)
-}
-
-func UpdateAliasActions(actions []string) string {
-	var request bytes.Buffer
-	request.WriteString(`{ "actions": [ `)
-	request.WriteString(strings.Join(actions, ", "))
-	request.WriteString(` ] }`)
-	return request.String()
 }
 
 func (config *IndexConfig) Validate() error {
@@ -202,24 +181,36 @@ func (config *IndexConfig) NextIndex(t time.Time) string {
 	return config.TargetIndex + "_" + suffix
 }
 
-func (config *IndexConfig) IndexSize(conn *elastigo.Conn) (int64, error) {
-	catIndexInfo := conn.GetCatIndexInfo(config.TargetIndex)
-	infoSize := len(catIndexInfo)
+func (config *IndexConfig) IndexSize(client *elastic.Client) (int64, error) {
+	cat := client.CatIndices()
+	cat.Index(config.TargetIndex)
+	cat.Bytes("b")
+	res, err := cat.Do(context.Background())
+	if err != nil {
+		return 0, err
+	}
+	infoSize := len(res)
 	if infoSize == 0 {
 		return 0, errors.New("Unable to find index in size calculation")
 	} else if infoSize > 1 {
 		return 0, errors.New("Too many indices returned in size calculation")
 	} else {
-		index := catIndexInfo[0]
-		return index.Store.PriSize, nil
+		index := res[0]
+		b, err := humanize.ParseBytes(index.PriStoreSize)
+		if err != nil {
+			return 0, err
+		}
+		return int64(b), nil
 	}
 }
 
-func (config *IndexConfig) HasRoom(conn *elastigo.Conn) (bool, error) {
-	if exists, _ := conn.ExistsIndex(config.TargetIndex, "", nil); !exists {
+func (config *IndexConfig) HasRoom(client *elastic.Client) (bool, error) {
+	exists := client.IndexExists(config.TargetIndex)
+	ok, _ := exists.Do(context.Background())
+	if !ok {
 		return false, nil
 	} else {
-		priSize, err := config.IndexSize(conn)
+		priSize, err := config.IndexSize(client)
 		if err != nil {
 			return true, err
 		} else {
@@ -227,42 +218,50 @@ func (config *IndexConfig) HasRoom(conn *elastigo.Conn) (bool, error) {
 			if err != nil {
 				return true, err
 			} else {
-				return priSize < int64(maxBytes), nil
+				hasRoom := priSize < int64(maxBytes)
+				return hasRoom, nil
 			}
 		}
 	}
 }
 
-func (config *IndexConfig) Roll(conn *elastigo.Conn, t time.Time) error {
+func (config *IndexConfig) Roll(client *elastic.Client, t time.Time) error {
 	nextIndex := config.NextIndex(t)
 	if config.RollsOnSize() {
-		room, err := config.HasRoom(conn)
+		room, err := config.HasRoom(client)
 		if err != nil {
 			return err
 		} else if room {
 			return nil
 		}
-	} else if exists, _ := conn.ExistsIndex(nextIndex, "", nil); exists {
-		return nil
+	} else {
+		exists := client.IndexExists(nextIndex)
+		ok, _ := exists.Do(context.Background())
+		if ok {
+			return nil
+		}
 	}
 	settings := make(map[string]interface{})
 	if config.Settings != nil {
-		settings = config.Settings
+		settings["settings"] = config.Settings
 	}
-	oldIndexes := config.OldIndexNames(conn)
-	if _, err := conn.CreateIndexWithSettings(nextIndex, settings); err != nil {
+	oldIndexes := config.OldIndexNames(client)
+	createIndex := client.CreateIndex(nextIndex)
+	createIndex.BodyJson(settings)
+	if _, err := createIndex.Do(context.Background()); err != nil {
 		return err
 	}
-	var cleanup, actions, optimizes []string
+	alias := client.Alias()
+	var cleanup, optimizes []string
 	var searchSuffix string = "_" + config.SearchSuffix
-	actions = append(actions, UpdateAliasAction("add", nextIndex, config.TargetIndex))
-	actions = append(actions, UpdateAliasAction("add", nextIndex, config.TargetIndex+searchSuffix))
+	alias.Add(nextIndex, config.TargetIndex)
+	alias.Add(nextIndex, config.TargetIndex+searchSuffix)
 	searchIndexes := 1 + len(oldIndexes)
 	for i, oldIndex := range oldIndexes {
-		actions = append(actions, UpdateAliasAction("remove", oldIndex.Name, config.TargetIndex))
+		alias.Remove(oldIndex.Name, config.TargetIndex)
 		retire := (searchIndexes - 1) >= config.IndexesToAliasForSearch
 		if retire {
-			actions = append(actions, UpdateAliasAction("remove", oldIndex.Name, config.TargetIndex+searchSuffix))
+			alias.Remove(oldIndex.Name, config.TargetIndex+searchSuffix)
 			searchIndexes = searchIndexes - 1
 			if config.DeleteOldIndexes {
 				cleanup = append(cleanup, oldIndex.Name)
@@ -275,38 +274,40 @@ func (config *IndexConfig) Roll(conn *elastigo.Conn, t time.Time) error {
 			}
 		}
 	}
-	if err := UpdateAliases(conn, UpdateAliasActions(actions)); err != nil {
+	if _, err := alias.Do(context.Background()); err != nil {
 		return err
 	}
 	if len(cleanup) > 0 {
 		if config.DeleteOldIndexes {
-			clean := strings.Join(cleanup, ",")
-			if _, err := conn.DeleteIndex(clean); err != nil {
+			del := client.DeleteIndex(cleanup...)
+			if _, err := del.Do(context.Background()); err != nil {
 				return err
 			}
 		} else if config.CloseOldIndexes {
-			clean := strings.Join(cleanup, ",")
-			if _, err := conn.Flush(clean); err != nil {
+			flush := client.Flush(cleanup...)
+			if _, err := flush.Do(context.Background()); err != nil {
 				return err
 			}
-			if _, err := conn.CloseIndex(clean); err != nil {
+			cls := client.CloseIndex(strings.Join(cleanup, ","))
+			if _, err := cls.Do(context.Background()); err != nil {
 				return err
 			}
 		}
 	}
 	if len(optimizes) > 0 {
 		if config.SettingsOnRoll != nil {
-			optimize := strings.Join(optimizes, ",")
-			if err := PutSettings(conn, optimize, config.SettingsOnRoll); err != nil {
+			settings := client.IndexPutSettings(optimizes...)
+			settings.BodyJson(config.SettingsOnRoll)
+			if _, err := settings.Do(context.Background()); err != nil {
 				return err
 			}
 		}
 		if config.OptimizeOnRoll {
-			args := make(map[string]interface{})
+			merge := client.Forcemerge(optimizes...)
 			if config.OptimizeMaxSegments != 0 {
-				args["max_num_segments"] = config.OptimizeMaxSegments
+				merge.MaxNumSegments(config.OptimizeMaxSegments)
 			}
-			if _, err := conn.OptimizeIndices(args, optimizes...); err != nil {
+			if _, err := merge.Do(context.Background()); err != nil {
 				return err
 			}
 		}
@@ -320,41 +321,45 @@ func (config *IndexConfig) RollsOnSize() bool {
 
 func (config *IndexConfig) ShouldRoll(t time.Time) bool {
 	var roll bool = false
-	if !config.RollsOnSize() {
-		if config.RollUnit == "minutes" {
-			roll = t.Second() == 0
-			if config.RollIncrement != 0 {
-				roll = roll && t.Minute()%config.RollIncrement == 0
-			}
-		} else if config.RollUnit == "hours" {
-			roll = t.Second() == 0 && t.Minute() == 0
-			if config.RollIncrement != 0 {
-				roll = roll && t.Hour()%config.RollIncrement == 0
-			}
-		} else {
-			roll = t.Second() == 0 && t.Minute() == 0 && t.Hour() == 0
-			if config.RollIncrement != 0 {
-				if config.RollUnit == "days" {
-					roll = roll && t.YearDay()%config.RollIncrement == 0
-				} else if config.RollUnit == "months" {
-					roll = roll && int(t.Month())%config.RollIncrement == 0
-				} else if config.RollUnit == "years" {
-					roll = roll && t.Year()%config.RollIncrement == 0
-				}
+	if config.RollsOnSize() {
+		return false
+	} else if config.RollUnit == "minutes" {
+		roll = t.Second() == 0
+		if config.RollIncrement != 0 {
+			roll = roll && t.Minute()%config.RollIncrement == 0
+		}
+	} else if config.RollUnit == "hours" {
+		roll = t.Second() == 0 && t.Minute() == 0
+		if config.RollIncrement != 0 {
+			roll = roll && t.Hour()%config.RollIncrement == 0
+		}
+	} else {
+		roll = t.Second() == 0 && t.Minute() == 0 && t.Hour() == 0
+		if config.RollIncrement != 0 {
+			if config.RollUnit == "days" {
+				roll = roll && t.YearDay()%config.RollIncrement == 0
+			} else if config.RollUnit == "months" {
+				roll = roll && int(t.Month())%config.RollIncrement == 0
+			} else if config.RollUnit == "years" {
+				roll = roll && t.Year()%config.RollIncrement == 0
 			}
 		}
 	}
 	return roll
 }
 
-func (config *IndexConfig) OldIndexNames(conn *elastigo.Conn) []Index {
+func (config *IndexConfig) OldIndexNames(client *elastic.Client) []Index {
+	cat := client.CatIndices()
+	cat.Index(config.TargetIndex + "_*")
+	cat.Columns("index", "status")
+	res, err := cat.Do(context.Background())
 	var indexes []Index
-	pattern := config.TargetIndex + "_*"
-	catIndexInfo := conn.GetCatIndexInfo(pattern)
-	for _, info := range catIndexInfo {
-		indexes = append(indexes, Index{Name: info.Name, Status: info.Status})
+	if err == nil {
+		for _, i := range res {
+			indexes = append(indexes, Index{Name: i.Index, Status: i.Status})
+		}
+		sort.Sort(ByIndexAge(indexes))
 	}
-	sort.Sort(ByIndexAge(indexes))
 	return indexes
 }
 
@@ -362,18 +367,66 @@ func AddWork(t time.Time) bool {
 	return t.Second() == 0
 }
 
-func (config *EsRollConfig) ConfigTransport() error {
+func (config *EsRollConfig) NewHTTPClient() (client *http.Client, err error) {
+	tlsConfig := &tls.Config{}
 	if config.ElasticPemFile != "" {
+		var ca []byte
 		certs := x509.NewCertPool()
-		if ca, err := ioutil.ReadFile(config.ElasticPemFile); err == nil {
+		if ca, err = ioutil.ReadFile(config.ElasticPemFile); err == nil {
 			certs.AppendCertsFromPEM(ca)
+			tlsConfig.RootCAs = certs
 		} else {
-			return err
+			return client, err
 		}
-		tlsConfig := &tls.Config{RootCAs: certs}
-		http.DefaultTransport.(*http.Transport).TLSClientConfig = tlsConfig
 	}
-	return nil
+	if config.Insecure {
+		// Turn off validation
+		tlsConfig.InsecureSkipVerify = true
+	}
+	transport := &http.Transport{
+		TLSHandshakeTimeout: time.Duration(30) * time.Second,
+		TLSClientConfig:     tlsConfig,
+	}
+	client = &http.Client{
+		Transport: transport,
+	}
+	if config.AWSAccessKey != "" {
+		client = aws.NewV4SigningClientWithHTTPClient(credentials.NewStaticCredentials(
+			config.AWSAccessKey,
+			config.AWSSecretKey,
+			"",
+		), config.AWSRegion, client)
+	}
+	return client, err
+}
+
+func (config *EsRollConfig) needsSecureScheme() bool {
+	if config.ElasticUrl != "" {
+		if strings.HasPrefix(config.ElasticUrl, "https") {
+			return true
+		}
+	}
+	return false
+}
+
+func (config *EsRollConfig) newElasticClient() (client *elastic.Client, err error) {
+	var clientOptions []elastic.ClientOptionFunc
+	var httpClient *http.Client
+	if config.needsSecureScheme() {
+		clientOptions = append(clientOptions, elastic.SetScheme("https"))
+	}
+	if config.ElasticUrl != "" {
+		clientOptions = append(clientOptions, elastic.SetURL(config.ElasticUrl))
+	}
+	if config.ElasticUser != "" {
+		clientOptions = append(clientOptions, elastic.SetBasicAuth(config.ElasticUser, config.ElasticPassword))
+	}
+	httpClient, err = config.NewHTTPClient()
+	if err != nil {
+		return client, err
+	}
+	clientOptions = append(clientOptions, elastic.SetHttpClient(httpClient))
+	return elastic.NewClient(clientOptions...)
 }
 
 func main() {
@@ -382,21 +435,24 @@ func main() {
 	var showVersion bool
 	flag.BoolVar(&showVersion, "v", false, "True to print the version number")
 	flag.StringVar(&mainConfig.ElasticUrl, "url", "", "ElasticSearch connection URL")
+	flag.StringVar(&mainConfig.ElasticUser, "user", "", "ElasticSearch user name")
+	flag.StringVar(&mainConfig.ElasticPassword, "pass", "", "ElasticSearch user password")
 	flag.StringVar(&mainConfig.ElasticPemFile, "pem", "", "Path to a PEM file for secure connections to ElasticSearch")
 	flag.BoolVar(&mainConfig.Daemon, "daemon", false, "Run as a daemon")
+	flag.BoolVar(&mainConfig.Insecure, "insecure", false, "Disable TLS validation")
+	flag.StringVar(&mainConfig.AWSAccessKey, "aws-access-key", "", "AWS access key")
+	flag.StringVar(&mainConfig.AWSSecretKey, "aws-secret-key", "", "AWS secret key")
+	flag.StringVar(&mainConfig.AWSRegion, "aws-region", "", "AWS region")
 	flag.Parse()
 	if showVersion {
 		fmt.Println(Version)
 		os.Exit(0)
 	}
-	if err := mainConfig.ConfigTransport(); err != nil {
-		log.Panic(err)
+	client, err := mainConfig.newElasticClient()
+	if err != nil {
+		panic(fmt.Sprintf("Unable to create elasticsearch client: %s", err))
 	}
-	conn := elastigo.NewConn()
-	if mainConfig.ElasticUrl != "" {
-		conn.SetFromUrl(mainConfig.ElasticUrl)
-	}
-	configs, err := GetConfigs(conn)
+	configs, err := GetConfigs(client)
 	if err != nil {
 		if mainConfig.Daemon {
 			log.Println("Configuration for esroll invalid or not found, waiting till one exists")
@@ -414,19 +470,18 @@ func main() {
 		var sizeTicker = time.NewTicker(10 * time.Second)
 		var workQ = make(chan (time.Time))
 		var initQ = make(chan (IndexConfig))
-		go func(conn *elastigo.Conn) {
+		go func(client *elastic.Client) {
 			sigs := make(chan os.Signal, 1)
 			signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL)
 			<-sigs
 			configTicker.Stop()
 			sizeTicker.Stop()
-			conn.Close()
+			client.Stop()
 			os.Exit(0)
-		}(conn)
+		}(client)
 		go func() {
 			var clock = time.NewTicker(1 * time.Second)
-			for {
-				t := <-clock.C
+			for t := range clock.C {
 				t = t.UTC()
 				if AddWork(t) {
 					workQ <- t
@@ -438,7 +493,7 @@ func main() {
 			case t := <-workQ:
 				for _, conf := range configs {
 					if conf.ShouldRoll(t) {
-						if err := conf.Roll(conn, t); err != nil {
+						if err := conf.Roll(client, t); err != nil {
 							log.Println(err)
 						}
 					}
@@ -446,24 +501,25 @@ func main() {
 			case <-sizeTicker.C:
 				for _, conf := range configs {
 					if conf.RollsOnSize() {
-						if err := conf.Roll(conn, time.Now().UTC()); err != nil {
+						if err := conf.Roll(client, time.Now().UTC()); err != nil {
 							log.Println(err)
 						}
 					}
 				}
 			case conf := <-initQ:
-				if err := conf.Roll(conn, time.Now().UTC()); err != nil {
+				if err := conf.Roll(client, time.Now().UTC()); err != nil {
 					log.Println(err)
 				}
 			case <-configTicker.C:
-				configs, err = GetConfigs(conn)
+				configs, err = GetConfigs(client)
 				if err == nil {
 					for _, config := range configs {
-						exists, _ := conn.ExistsIndex(config.TargetIndex, "", nil)
-						if !exists {
-							go func() {
-								initQ <- config
-							}()
+						exists := client.IndexExists(config.TargetIndex)
+						ok, _ := exists.Do(context.Background())
+						if !ok {
+							go func(c IndexConfig) {
+								initQ <- c
+							}(config)
 						}
 					}
 				} else {
@@ -473,7 +529,7 @@ func main() {
 		}
 	} else {
 		for _, conf := range configs {
-			if err := conf.Roll(conn, time.Now().UTC()); err != nil {
+			if err := conf.Roll(client, time.Now().UTC()); err != nil {
 				log.Println(err)
 			}
 		}
